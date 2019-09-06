@@ -32,6 +32,7 @@
 
 #include "py/mphal.h"
 #include "extmod/machine_spi.h"
+#include "ports/stm32/font_petme128_8x8.h"
 
 #include "mcd8544.h"
 
@@ -278,6 +279,26 @@ STATIC mp_obj_t mcd8544_MCD8544_clear(mp_obj_t self_in) {
 MP_DEFINE_CONST_FUN_OBJ_1(mcd8544_MCD8544_clear_obj, mcd8544_MCD8544_clear);
 
 
+STATIC mp_obj_t mcd8544_MCD8544_text(mp_obj_t self_in, mp_obj_t text) {
+    mcd8544_MCD8544_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    const char *str = mp_obj_str_get_str(text);
+
+    // loop over chars
+    for (; *str; ++str) {
+        // get char and make sure its in range of font
+        int chr = *(uint8_t*)str;
+        if (chr < 32 || chr > 127) {
+            chr = 127;
+        }
+        // get char data
+        const uint8_t *chr_data = &font_petme128_8x8[(chr - 32) * 8];
+        write_data(self, chr_data, 8);
+    }
+    return mp_const_none;
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_2(mcd8544_MCD8544_text_obj, mcd8544_MCD8544_text);
+
+
 STATIC mp_obj_t mcd8544_MCD8544_command(mp_obj_t self_in, mp_obj_t command) {
     mcd8544_MCD8544_obj_t *self = MP_OBJ_TO_PTR(self_in);
     write_cmd(self, (uint8_t)mp_obj_get_int(command));
@@ -304,10 +325,11 @@ STATIC const mp_rom_map_elem_t mcd8544_MCD8544_locals_dict_table[] = {
     //{ MP_ROM_QSTR(MP_QSTR_contrast), MP_ROM_PTR(&mcd8544_MCD8544_contrast_obj) },
     { MP_ROM_QSTR(MP_QSTR_invert), MP_ROM_PTR(&mcd8544_MCD8544_invert_obj) },
     { MP_ROM_QSTR(MP_QSTR_display), MP_ROM_PTR(&mcd8544_MCD8544_display_obj) },
-    { MP_ROM_QSTR(MP_QSTR_test), MP_ROM_PTR(&mcd8544_MCD8544_test_obj) },
-    { MP_ROM_QSTR(MP_QSTR_clear), MP_ROM_PTR(&mcd8544_MCD8544_clear_obj) },
+    //{ MP_ROM_QSTR(MP_QSTR_test), MP_ROM_PTR(&mcd8544_MCD8544_test_obj) },
+    //{ MP_ROM_QSTR(MP_QSTR_clear), MP_ROM_PTR(&mcd8544_MCD8544_clear_obj) },
     { MP_ROM_QSTR(MP_QSTR_horizontal), MP_ROM_PTR(&mcd8544_MCD8544_horizontal_obj) },
     { MP_ROM_QSTR(MP_QSTR_position), MP_ROM_PTR(&mcd8544_MCD8544_position_obj) },
+    { MP_ROM_QSTR(MP_QSTR_text), MP_ROM_PTR(&mcd8544_MCD8544_text_obj) },
     { MP_ROM_QSTR(MP_QSTR_command), MP_ROM_PTR(&mcd8544_MCD8544_command_obj) },
     { MP_ROM_QSTR(MP_QSTR_data), MP_ROM_PTR(&mcd8544_MCD8544_data_obj) },
 };
