@@ -348,14 +348,17 @@ mp_obj_t mcd8544_MCD8544_make_new(const mp_obj_type_t *type, size_t n_args, size
     }
     self->dc = mp_hal_get_pin_obj(args[ARG_dc].u_obj);
     mp_hal_pin_output(self->dc);
+    mp_hal_pin_write(self->dc, 0);
 
     if (args[ARG_cs].u_obj != MP_OBJ_NULL) {
         self->cs = mp_hal_get_pin_obj(args[ARG_cs].u_obj);
         mp_hal_pin_output(self->cs);
+        mp_hal_pin_write(self->cs, 1);
     }
     if (args[ARG_reset].u_obj != MP_OBJ_NULL) {
         self->reset = mp_hal_get_pin_obj(args[ARG_reset].u_obj);
         mp_hal_pin_output(self->reset);
+        mp_hal_pin_write(self->reset, 1);
     }
 
     // power down, horizontal addressing, basic instruction set
