@@ -1,6 +1,8 @@
 #ifndef __MCD8544_H__
 #define __MCD8544_H__
 
+// version 0.0.3
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -29,7 +31,6 @@ extern "C" {
 #define MCD8544_VOP          128 // 0x80
 #define MCD8544_VOP_DEFAULT  63  // Contrast set to around 50%
 
-
 // DDRAM addresses
 #define MCD8544_COL_ADDR   128 // 0x80 x pos (0~83)
 #define MCD8544_BANK_ADDR  64  // 0x40 y pos, in banks of 8 rows (0~5)
@@ -37,7 +38,6 @@ extern "C" {
 // Display dimensions
 #define MCD8544_WIDTH   84  // 0x54
 #define MCD8544_HEIGHT  48  // 0x30 (6 banks of 8 vertically stacked pixels)
-#define MCD8544_BYTES   504 // 84 * 48 / 8
 
 #ifdef  __cplusplus
 }

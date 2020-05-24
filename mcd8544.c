@@ -24,7 +24,7 @@
  * SOFTWARE.
  */
 
-#define __MCD8544_VERSION__  "0.0.1"
+#define __MCD8544_VERSION__  "0.0.3"
 
 #include "py/obj.h"
 #include "py/runtime.h"
@@ -56,6 +56,9 @@ typedef struct _mcd8544_MCD8544_obj_t {
     mp_hal_pin_obj_t cs;
     mp_hal_pin_obj_t reset;
     uint8_t fn;
+    uint8_t vop;
+    uint8_t bias;
+    uint8_t temp;
 } mcd8544_MCD8544_obj_t;
 
 mp_obj_t mcd8544_MCD8544_make_new( const mp_obj_type_t *type,
@@ -65,52 +68,35 @@ mp_obj_t mcd8544_MCD8544_make_new( const mp_obj_type_t *type,
 
 STATIC void mcd8544_MCD8544_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind) {
     mcd8544_MCD8544_obj_t *self = MP_OBJ_TO_PTR(self_in);
-    mp_printf(print, "<MCD8544 spi=%p>", self->spi_obj);
+    mp_printf(print, "<MCD8544 spi=%p vert=%u>", self->spi_obj, (self->fn >> 1) & 1);
 }
 
 
 STATIC void write_cmd(mcd8544_MCD8544_obj_t *self, uint8_t cmd) {
-    CS_LOW()
+    CS_LOW();
     DC_LOW();
     write_spi(self->spi_obj, &cmd, 1);
-    CS_HIGH()
+    CS_HIGH();
 }
 
 STATIC void write_data(mcd8544_MCD8544_obj_t *self, const uint8_t *data, int len) {
-    CS_LOW()
+    CS_LOW();
     DC_HIGH();
     if (len > 0) {
         write_spi(self->spi_obj, data, len);
     }
-    CS_HIGH()
-}
-
-
-STATIC void write_extended_cmd(mcd8544_MCD8544_obj_t *self, uint8_t vop, uint8_t bias, uint8_t temp) {
-    // switch to extended instruction set
-    // extended instruction set is required to set temp, bias and vop
-    write_cmd(self, self->fn | MCD8544_EXTENDED_INSTR);
-    // set temperature coefficient
-    write_cmd(self, MCD8544_TEMP_COEFF | temp); // 0x04 | 0..3
-    // set bias system (n=3 recommended mux rate 1:40/1:34)
-    write_cmd(self, MCD8544_BIAS | bias); // 0x10 | 0..7
-    // set contrast with operating voltage (0x00~0x7f)
-    // 0x00 = 3.00V, 0x3f = 6.84V, 0x7f = 10.68V
-    // starting at 3.06V, each bit increments voltage by 0.06V at room temperature
-    write_cmd(self, MCD8544_VOP | vop);
-    // revert to basic instruction set
-    write_cmd(self, self->fn & ~MCD8544_EXTENDED_INSTR);
+    CS_HIGH();
 }
 
 
 STATIC mp_obj_t mcd8544_MCD8544_reset(mp_obj_t self_in) {
     mcd8544_MCD8544_obj_t *self = MP_OBJ_TO_PTR(self_in);
     // reset pulse soft resets the display
-    // you need to call power() or init() to resume
+    // you need to call power(1) or init() to resume
     RESET_HIGH();
-    mp_hal_delay_us(100);
+    mp_hal_delay_us(500);
     RESET_LOW();
-    mp_hal_delay_us(100); // reset pulse has to be >100 ns and <100 ms
+    mp_hal_delay_us(500); // reset pulse has to be >100 ns and <100 ms
     RESET_HIGH();
     mp_hal_delay_us(100);
     return mp_const_none;
@@ -118,59 +104,86 @@ STATIC mp_obj_t mcd8544_MCD8544_reset(mp_obj_t self_in) {
 MP_DEFINE_CONST_FUN_OBJ_1(mcd8544_MCD8544_reset_obj, mcd8544_MCD8544_reset);
 
 
-STATIC void mcd8544_MCD8544_init_internal(mcd8544_MCD8544_obj_t *self, bool horizontal, uint8_t vop, uint8_t bias, uint8_t temp) {
+STATIC void mcd8544_MCD8544_init_internal(mcd8544_MCD8544_obj_t *self, int horizontal, int vop, int bias, int temp) {
+
+    // set addressing mode
+    if (horizontal == 0) {
+        self->fn |= MCD8544_ADDRESSING_VERT;  // switch to vertical
+    }
+    else if (horizontal == 1) {
+        self->fn &= ~MCD8544_ADDRESSING_VERT;  // switch to horizontal
+    }
+
+    // set voltages (contrast settings)
+    if (vop != -1) {
+        if (vop < 0 || vop > 127) mp_raise_ValueError(MP_ERROR_TEXT("Operating voltage out of range (0..127)"));
+        self->vop = (uint8_t)vop;
+    }
+    if (bias != -1) {
+        if (bias < 0 || bias > 7) mp_raise_ValueError(MP_ERROR_TEXT("Bias voltage out of range (0..7)"));
+        self->bias = (uint8_t)bias;
+    }
+    if (temp != -1) {
+        if (temp < 0 || temp > 3) mp_raise_ValueError(MP_ERROR_TEXT("Temperature coefficient out of range (0..3)"));
+        self->temp = (uint8_t)temp;
+    }
+
     // reset pulse
     mcd8544_MCD8544_reset(self);
 
-    // Horizontal is the default. Switch to vertical?
-    //if (!mp_obj_new_bool(args[ARG_horizontal].u_bool)) {
-    if (!horizontal) {
-        self->fn |= MCD8544_ADDRESSING_VERT;
-    }
+    // switch to extended instruction set
+    // extended instruction set is required to set temp, bias and vop
+    write_cmd(self, self->fn | MCD8544_EXTENDED_INSTR);
+    // set temperature coefficient
+    write_cmd(self, MCD8544_TEMP_COEFF | self->temp); // 0x04 | 0..3
+    // set bias system (n=3 recommended mux rate 1:40/1:34)
+    write_cmd(self, MCD8544_BIAS | self->bias); // 0x10 | 0..7
+    // set contrast with operating voltage (0x00~0x7f)
+    // 0x00 = 3.00V, 0x3f = 6.84V, 0x7f = 10.68V
+    // starting at 3.06V, each bit increments voltage by 0.06V at room temperature
+    write_cmd(self, MCD8544_VOP | self->vop);
+    // switch back to basic instruction set
+    write_cmd(self, self->fn & ~MCD8544_EXTENDED_INSTR);
 
     // power on
     self->fn &= ~MCD8544_POWER_DOWN;
 
-    // Set voltages
-    // uint8_t vop = args[ARG_vop].u_int;
-    // uint8_t bias = args[ARG_bias].u_int;
-    // uint8_t temp = args[ARG_temp].u_int;
-
-    // execute both extended and basic instruction set
-    write_extended_cmd(self, vop, bias, temp);
+    // execute basic instruction set
+    write_cmd(self, self->fn);
 
     // display on
     write_cmd(self, MCD8544_DISPLAY_NORMAL);
 }
 
+
 STATIC mp_obj_t mcd8544_MCD8544_init(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
     enum { ARG_horizontal, ARG_vop, ARG_bias, ARG_temp };
     static const mp_arg_t allowed_args[] = {
-        { MP_QSTR_horizontal, MP_ARG_BOOL, {.u_bool = true} },
-        { MP_QSTR_vop,        MP_ARG_INT, {.u_int = MCD8544_VOP_DEFAULT} },
-        { MP_QSTR_bias,       MP_ARG_INT, {.u_int = MCD8544_BIAS_DEFAULT} },
-        { MP_QSTR_temp,       MP_ARG_INT, {.u_int = MCD8544_TEMP_COEFF_DEFAULT} },
+        { MP_QSTR_horizontal, MP_ARG_INT, {.u_int = -1} },
+        { MP_QSTR_vop,        MP_ARG_INT, {.u_int = -1} },
+        { MP_QSTR_bias,       MP_ARG_INT, {.u_int = -1} },
+        { MP_QSTR_temp,       MP_ARG_INT, {.u_int = -1} },
     };
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
-    mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
+    mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
 
     mcd8544_MCD8544_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
 
     mcd8544_MCD8544_init_internal(
         self,
-        args[ARG_horizontal].u_bool,
+        args[ARG_horizontal].u_int,
         args[ARG_vop].u_int,
         args[ARG_bias].u_int,
         args[ARG_temp].u_int
     );
     return mp_const_none;
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_KW(mcd8544_MCD8544_init_obj, 0, mcd8544_MCD8544_init);
+STATIC MP_DEFINE_CONST_FUN_OBJ_KW(mcd8544_MCD8544_init_obj, 1, mcd8544_MCD8544_init);
 
 
-STATIC mp_obj_t mcd8544_MCD8544_power(size_t n_args, const mp_obj_t *args) {
-    mcd8544_MCD8544_obj_t *self = MP_OBJ_TO_PTR(args[0]);
-    if (n_args == 1 || mp_obj_is_true(args[1])) {
+STATIC mp_obj_t mcd8544_MCD8544_power(mp_obj_t self_in, mp_obj_t on) {
+    mcd8544_MCD8544_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    if (mp_obj_is_true(on)) {
         self->fn &= ~MCD8544_POWER_DOWN;
     } else {
         self->fn |= MCD8544_POWER_DOWN;
@@ -178,84 +191,43 @@ STATIC mp_obj_t mcd8544_MCD8544_power(size_t n_args, const mp_obj_t *args) {
     write_cmd(self, self->fn);
     return mp_const_none;
 }
-MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mcd8544_MCD8544_power_obj, 1, 2, mcd8544_MCD8544_power);
+MP_DEFINE_CONST_FUN_OBJ_2(mcd8544_MCD8544_power_obj, mcd8544_MCD8544_power);
 
 
-// Doesnt fit - needs refactor
-//STATIC mp_obj_t mcd8544_MCD8544_contrast(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
-//    static const mp_arg_t allowed_args[] = {
-//        { MP_QSTR_vop,  MP_ARG_INT, {.u_int = MCD8544_VOP_DEFAULT} },
-//        { MP_QSTR_bias, MP_ARG_INT, {.u_int = MCD8544_BIAS_DEFAULT} },
-//        { MP_QSTR_temp, MP_ARG_INT, {.u_int = MCD8544_TEMP_COEFF_DEFAULT} },
-//    };
-//    mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
-//    mp_arg_parse_all(n_args, pos_args, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
-//
-//    mcd8544_MCD8544_obj_t *self = MP_OBJ_TO_PTR(pos_args[0]);
-//
-//    // Set the contrast and voltages
-//    uint8_t vop = args[0].u_int;
-//    uint8_t bias = args[1].u_int;
-//    uint8_t temp = args[2].u_int;
-//
-//    if (vop < 0 || vop > 127) mp_raise_ValueError("Operating voltage out of range");
-//    if (bias < 0 || bias > 7) mp_raise_ValueError("Bias voltage out of range");
-//    if (temp < 0 || temp > 3) mp_raise_ValueError("Temperature coefficient out of range");
-//
-//    write_extended_cmd(self, vop, bias, temp);
-//    return mp_const_none;
-//}
-//STATIC MP_DEFINE_CONST_FUN_OBJ_KW(mcd8544_MCD8544_contrast_obj, 1, mcd8544_MCD8544_contrast);
-
-
-STATIC mp_obj_t mcd8544_MCD8544_invert(size_t n_args, const mp_obj_t *args) {
-    mcd8544_MCD8544_obj_t *self = MP_OBJ_TO_PTR(args[0]);
-    if (n_args == 1 || mp_obj_is_true(args[1])) {
+STATIC mp_obj_t mcd8544_MCD8544_invert(mp_obj_t self_in, mp_obj_t inverted) {
+    mcd8544_MCD8544_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    if (mp_obj_is_true(inverted)) {
         write_cmd(self, MCD8544_DISPLAY_INVERSE);
     } else {
         write_cmd(self, MCD8544_DISPLAY_NORMAL);
     }
     return mp_const_none;
 }
-MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mcd8544_MCD8544_invert_obj, 1, 2, mcd8544_MCD8544_invert);
+MP_DEFINE_CONST_FUN_OBJ_2(mcd8544_MCD8544_invert_obj, mcd8544_MCD8544_invert);
 
 
-STATIC mp_obj_t mcd8544_MCD8544_display(size_t n_args, const mp_obj_t *args) {
-    mcd8544_MCD8544_obj_t *self = MP_OBJ_TO_PTR(args[0]);
-    if (n_args == 1 || mp_obj_is_true(args[1])) {
+STATIC mp_obj_t mcd8544_MCD8544_display(mp_obj_t self_in, mp_obj_t normal) {
+    mcd8544_MCD8544_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    if (mp_obj_is_true(normal)) {
         write_cmd(self, MCD8544_DISPLAY_NORMAL);
     } else {
         write_cmd(self, MCD8544_DISPLAY_BLANK);
     }
     return mp_const_none;
 }
-MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mcd8544_MCD8544_display_obj, 1, 2, mcd8544_MCD8544_display);
+MP_DEFINE_CONST_FUN_OBJ_2(mcd8544_MCD8544_display_obj, mcd8544_MCD8544_display);
 
 
-STATIC mp_obj_t mcd8544_MCD8544_test(size_t n_args, const mp_obj_t *args) {
-    mcd8544_MCD8544_obj_t *self = MP_OBJ_TO_PTR(args[0]);
-    if (n_args == 1 || mp_obj_is_true(args[1])) {
+STATIC mp_obj_t mcd8544_MCD8544_test(mp_obj_t self_in, mp_obj_t testing) {
+    mcd8544_MCD8544_obj_t *self = MP_OBJ_TO_PTR(self_in);
+    if (mp_obj_is_true(testing)) {
         write_cmd(self, MCD8544_DISPLAY_ALL);
     } else {
         write_cmd(self, MCD8544_DISPLAY_NORMAL);
     }
     return mp_const_none;
 }
-MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mcd8544_MCD8544_test_obj, 1, 2, mcd8544_MCD8544_test);
-
-
-STATIC mp_obj_t mcd8544_MCD8544_horizontal(size_t n_args, const mp_obj_t *args) {
-    mcd8544_MCD8544_obj_t *self = MP_OBJ_TO_PTR(args[0]);
-    // vertical or horizontal addressing
-    if (n_args == 1 || mp_obj_is_true(args[1])) {
-        self->fn &= ~MCD8544_ADDRESSING_VERT;
-    } else {
-        self->fn |= MCD8544_ADDRESSING_VERT;
-    }
-    write_cmd(self, self->fn);
-    return mp_const_none;
-}
-MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(mcd8544_MCD8544_horizontal_obj, 1, 2, mcd8544_MCD8544_horizontal);
+MP_DEFINE_CONST_FUN_OBJ_2(mcd8544_MCD8544_test_obj, mcd8544_MCD8544_test);
 
 
 STATIC mp_obj_t mcd8544_MCD8544_position(mp_obj_t self_in, mp_obj_t x, mp_obj_t y) {
@@ -268,19 +240,38 @@ STATIC mp_obj_t mcd8544_MCD8544_position(mp_obj_t self_in, mp_obj_t x, mp_obj_t 
 MP_DEFINE_CONST_FUN_OBJ_3(mcd8544_MCD8544_position_obj, mcd8544_MCD8544_position);
 
 
-STATIC mp_obj_t mcd8544_MCD8544_clear(mp_obj_t self_in) {
+STATIC mp_obj_t mcd8544_MCD8544_fill(mp_obj_t self_in, mp_obj_t color) {
     mcd8544_MCD8544_obj_t *self = MP_OBJ_TO_PTR(self_in);
     // clear DDRAM, reset x,y position to 0,0
-    uint8_t buffer[MCD8544_BYTES]; // 4032 pixels == 504 bytes (84 cols, 48 rows)
-    write_data(self, (const uint8_t*)buffer, MCD8544_BYTES);
+
+    // Throws: Guru Meditation Error: Core 1 panic'ed (LoadProhibited). Exception was unhandled.
+    // uint8_t buffer[504]; // 4032 pixels == 504 bytes (84 cols, 48 rows)
+    // write_data(self, (const uint8_t*)buffer, 504);
+
+    uint8_t buf[8];
+    uint8_t c = (mp_obj_get_int(color) > 0) ? 255 : 0;
+    for (int i = 0; i < 8; i++) {
+        buf[i] = c;
+    }
+    // fill the 6 pages in chunks
+    for (int i = 0; i < 504; i++) {
+        write_data(self, buf, 8);
+    }
+
     mcd8544_MCD8544_position(self, 0, 0);
     return mp_const_none;
 }
-MP_DEFINE_CONST_FUN_OBJ_1(mcd8544_MCD8544_clear_obj, mcd8544_MCD8544_clear);
+MP_DEFINE_CONST_FUN_OBJ_2(mcd8544_MCD8544_fill_obj, mcd8544_MCD8544_fill);
 
 
 STATIC mp_obj_t mcd8544_MCD8544_text(mp_obj_t self_in, mp_obj_t text) {
     mcd8544_MCD8544_obj_t *self = MP_OBJ_TO_PTR(self_in);
+
+    // only works in horizontal mode
+    //if ((self->fn & MCD8544_ADDRESSING_VERT) == MCD8544_ADDRESSING_VERT) {
+    //    mp_raise_ValueError(MP_ERROR_TEXT("Only supported when in horizontal addressing mode"));
+    //}
+
     const char *str = mp_obj_str_get_str(text);
 
     // loop over chars
@@ -321,14 +312,11 @@ STATIC const mp_rom_map_elem_t mcd8544_MCD8544_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_init), MP_ROM_PTR(&mcd8544_MCD8544_init_obj) },
     { MP_ROM_QSTR(MP_QSTR_reset), MP_ROM_PTR(&mcd8544_MCD8544_reset_obj) },
     { MP_ROM_QSTR(MP_QSTR_power), MP_ROM_PTR(&mcd8544_MCD8544_power_obj) },
-    // doesnt fit - needs refactor
-    //{ MP_ROM_QSTR(MP_QSTR_contrast), MP_ROM_PTR(&mcd8544_MCD8544_contrast_obj) },
     { MP_ROM_QSTR(MP_QSTR_invert), MP_ROM_PTR(&mcd8544_MCD8544_invert_obj) },
     { MP_ROM_QSTR(MP_QSTR_display), MP_ROM_PTR(&mcd8544_MCD8544_display_obj) },
-    //{ MP_ROM_QSTR(MP_QSTR_test), MP_ROM_PTR(&mcd8544_MCD8544_test_obj) },
-    //{ MP_ROM_QSTR(MP_QSTR_clear), MP_ROM_PTR(&mcd8544_MCD8544_clear_obj) },
-    { MP_ROM_QSTR(MP_QSTR_horizontal), MP_ROM_PTR(&mcd8544_MCD8544_horizontal_obj) },
+    { MP_ROM_QSTR(MP_QSTR_test), MP_ROM_PTR(&mcd8544_MCD8544_test_obj) },
     { MP_ROM_QSTR(MP_QSTR_position), MP_ROM_PTR(&mcd8544_MCD8544_position_obj) },
+    { MP_ROM_QSTR(MP_QSTR_fill), MP_ROM_PTR(&mcd8544_MCD8544_fill_obj) },
     { MP_ROM_QSTR(MP_QSTR_text), MP_ROM_PTR(&mcd8544_MCD8544_text_obj) },
     { MP_ROM_QSTR(MP_QSTR_command), MP_ROM_PTR(&mcd8544_MCD8544_command_obj) },
     { MP_ROM_QSTR(MP_QSTR_data), MP_ROM_PTR(&mcd8544_MCD8544_data_obj) },
@@ -351,10 +339,10 @@ mp_obj_t mcd8544_MCD8544_make_new(const mp_obj_type_t *type, size_t n_args, size
         { MP_QSTR_dc,         MP_ARG_OBJ | MP_ARG_REQUIRED, {.u_obj = MP_OBJ_NULL} },
         { MP_QSTR_cs,         MP_ARG_OBJ, {.u_obj = MP_OBJ_NULL} },
         { MP_QSTR_reset,      MP_ARG_OBJ, {.u_obj = MP_OBJ_NULL} },
-        { MP_QSTR_horizontal, MP_ARG_KW_ONLY | MP_ARG_BOOL, {.u_bool = true} },
-        { MP_QSTR_vop,        MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = MCD8544_VOP_DEFAULT} },
-        { MP_QSTR_bias,       MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = MCD8544_BIAS_DEFAULT} },
-        { MP_QSTR_temp,       MP_ARG_KW_ONLY | MP_ARG_INT, {.u_int = MCD8544_TEMP_COEFF_DEFAULT} },
+        { MP_QSTR_horizontal, MP_ARG_INT, {.u_int = 1} },
+        { MP_QSTR_vop,        MP_ARG_INT, {.u_int = MCD8544_VOP_DEFAULT} },
+        { MP_QSTR_bias,       MP_ARG_INT, {.u_int = MCD8544_BIAS_DEFAULT} },
+        { MP_QSTR_temp,       MP_ARG_INT, {.u_int = MCD8544_TEMP_COEFF_DEFAULT} },
     };
     mp_arg_val_t args[MP_ARRAY_SIZE(allowed_args)];
     mp_arg_parse_all_kw_array(n_args, n_kw, all_args, MP_ARRAY_SIZE(allowed_args), allowed_args, args);
@@ -366,17 +354,20 @@ mp_obj_t mcd8544_MCD8544_make_new(const mp_obj_type_t *type, size_t n_args, size
     self->spi_obj = spi_obj;
 
     if (args[ARG_dc].u_obj == MP_OBJ_NULL) {
-        mp_raise_ValueError("dc pin is required");
+        mp_raise_ValueError(MP_ERROR_TEXT("dc pin is required"));
     }
     self->dc = mp_hal_get_pin_obj(args[ARG_dc].u_obj);
     mp_hal_pin_output(self->dc);
     mp_hal_pin_write(self->dc, 0);
 
+    // cs pin is optional
     if (args[ARG_cs].u_obj != MP_OBJ_NULL) {
         self->cs = mp_hal_get_pin_obj(args[ARG_cs].u_obj);
         mp_hal_pin_output(self->cs);
         mp_hal_pin_write(self->cs, 1);
     }
+
+    // reset pin is optional
     if (args[ARG_reset].u_obj != MP_OBJ_NULL) {
         self->reset = mp_hal_get_pin_obj(args[ARG_reset].u_obj);
         mp_hal_pin_output(self->reset);
@@ -386,11 +377,13 @@ mp_obj_t mcd8544_MCD8544_make_new(const mp_obj_type_t *type, size_t n_args, size
     // power down, horizontal addressing, basic instruction set
     self->fn = MCD8544_FUNCTION_SET | MCD8544_POWER_DOWN;
 
-    // does not work
-    //mp_map_t kw_args;
-    //mcd8544_MCD8544_init(n_args, all_args, &kw_args);
-    // works
-    mcd8544_MCD8544_init_internal(self, args[ARG_horizontal].u_bool, args[ARG_vop].u_int, args[ARG_bias].u_int, args[ARG_temp].u_int);
+    mcd8544_MCD8544_init_internal(
+        self,
+        args[ARG_horizontal].u_int,
+        args[ARG_vop].u_int,
+        args[ARG_bias].u_int,
+        args[ARG_temp].u_int
+    );
     return MP_OBJ_FROM_PTR(self);
 }
 
